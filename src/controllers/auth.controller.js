@@ -1,31 +1,36 @@
-// 📂 src/controllers/auth.controller.js (Auth Controller)
-import User from '../models/user.model.js';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-export const registerUser = async (req, res) => {
+import jwt from "jsonwebtoken";
+import User from "../models/user.model.js";
+import { verifyClerkSession } from "../services/clerk.service.js";
+import { generateStreamToken } from "../services/stream.service.js";
+import ApiError from "../utils/ApiError.js";
+import ApiResponse from "../utils/ApiResponse.js";
+
+export const verifyOTP = async (req, res, next) => {
     try {
-        const { name, email, password } = req.body;
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(password, salt);
-        const user = await User.create({ name, email, password: hashedPassword });
-        res.status(201).json({ message: 'User registered', user });
-    } catch (error) {
-        res.status(400).json({ message: error.message });
-    }
-};
-export const loginUser = async (req, res) => {
-    try {
-        const { email, password } = req.body;
-        const user = await User.findOne({ email });
-        if (user && (await bcrypt.compare(password, user.password))) {
-            const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
-                expiresIn: '1h',
-            });
-            res.json({ message: 'Login successful', token });
+        const { sessionToken, email } = req.body;
+        if (!sessionToken || !email) return next(new ApiError(400, "Missing sessionToken or email"));
+
+        // 🔍 Validate Clerk Session
+        const clerkUserID = await verifyClerkSession(sessionToken);
+        if (!clerkUserID) return next(new ApiError(401, "Invalid Clerk session"));
+
+        // 🔑 Generate Stream Token
+        const streamToken = generateStreamToken(clerkUserID);
+
+        // 🔑 Generate JWT Token for User Authentication
+        const jwtToken = jwt.sign({ clerkUserID, email }, process.env.JWT_SECRET, { expiresIn: "7d" });
+
+        // 📌 Store User in Database
+        let user = await User.findOne({ clerkUserID });
+        if (!user) {
+            user = await User.create({ clerkUserID, email, streamToken, jwtToken });
         } else {
-            res.status(401).json({ message: 'Invalid credentials' });
+            user.jwtToken = jwtToken;
+            await user.save();
         }
+
+        res.json(new ApiResponse(200, "OTP Verified", { streamToken, jwtToken, user }));
     } catch (error) {
-        res.status(400).json({ message: error.message });
+        next(new ApiError(500, "OTP verification failed", error));
     }
 };
